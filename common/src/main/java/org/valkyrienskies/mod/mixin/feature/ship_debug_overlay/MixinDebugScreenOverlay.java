@@ -36,12 +36,12 @@ public abstract class MixinDebugScreenOverlay {
     @Shadow
     protected abstract Level getLevel();
 
-    @Inject(method = "getGameInformation", at = @At(value = "INVOKE", target = "Ljava/util/List;add(Ljava/lang/Object;)Z", ordinal = 1))
-    private void addShipCountInformation(CallbackInfoReturnable<List<String>> cir, @Local List<String> list) {
+    @Inject(method = "getGameInformation", at = @At("RETURN"))
+    private void addShipCountInformation(CallbackInfoReturnable<List<String>> cir) {
         Level l = getLevel();
         if (l instanceof ServerLevel) {
-            ServerShipWorld world = VSGameUtilsKt.getShipObjectWorld((ServerLevel)l);
-            list.add("Ships Loaded: " + world.getLoadedShips().size() + "/" + world.getAllShips().size());
+            ServerShipWorld world = VSGameUtilsKt.getShipObjectWorld((ServerLevel) l);
+            cir.getReturnValue().add("Ships Loaded: " + world.getLoadedShips().size() + "/" + world.getAllShips().size());
         }
     }
 
