@@ -273,6 +273,53 @@ object ShipAssembler {
             }
         }
 
+        // ========== Placing New Blocks
+        // Blocks are placed in the destination FIRST so that if placement fails the original
+        // blocks are left intact.  Removal happens only after a successful placement.
+
+        //structure template builds from a corner, so offset center of plot so that structure's center and center of
+        //plot roughly align
+        val cornerOfShip = Vector3d(toCenter)
+            .sub(offset)
+            .ceil()
+            .let { BlockPos(
+                it.x.toInt(),
+                it.y.toInt(),
+                it.z.toInt(),
+            ) }
+
+        val centerOfShip = cornerOfShip.toJOMLD().add(offset)
+
+        val structureSettings = StructurePlaceSettings().addProcessor(
+            ICopyableProcessor(
+                SingleItemMap(fromId, toShip?.id ?: -1L, -1L) {it},
+                SingleItemMap(fromId, Pair(fromCenter, Vector3d(centerOfShip)), Pair(Vector3d(), Vector3d()))
+            )
+        )
+
+        structureSettings.rotationPivot = cornerOfShip
+
+        // Place blocks in the destination level (may be a dedicated shipyard dimension).
+        VSAssemblyEvents.onPasteBeforeBlocksAreLoaded.emit(VSAssemblyEvents.OnPasteBeforeBlocksAreLoaded(level, fromShip, toShip, Pair(fromCenter, centerOfShip), eventData))
+        val placed = template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
+        ASSEMBLY_LOGGER.info(
+            "[VS-DBG][moveBlocksFromTo] placeInWorld: placed={} corner={} minStructurePos={} maxStructurePos={} destDim={}",
+            placed, cornerOfShip, minStructurePos, maxStructurePos, destinationLevel.dimensionId
+        )
+        if (!placed) {
+            ASSEMBLY_LOGGER.warn(
+                "[VS-DBG][moveBlocksFromTo] placeInWorld FAILED — original blocks not removed. filteredBlocks={} destDim={} sourceDim={}",
+                filteredBlocks.size, destinationLevel.dimensionId, sourceLevel.dimensionId
+            )
+            // Resume chunk updates immediately — no blocks were moved, clients should not stay frozen.
+            level.players().forEach { player ->
+                with(vsCore.simplePacketNetworking) {
+                    PacketRestartChunkUpdates(chunkPosesJOML).sendToClient(player.playerWrapper)
+                }
+            }
+            return failedMove
+        }
+
         // ========== Removing Old Blocks
         if (removeOriginal) {
             ASSEMBLY_LOGGER.info(
@@ -318,44 +365,6 @@ object ShipAssembler {
                 "[VS-DBG][moveBlocksFromTo] removeOriginal: done, removedCount={} sourceDim={}",
                 removedCount, sourceLevel.dimensionId
             )
-        }
-        // ========== Placing New Blocks
-
-        //structure template builds from a corner, so offset center of plot so that structure's center and center of
-        //plot roughly align
-        val cornerOfShip = Vector3d(toCenter)
-            .sub(offset)
-            .ceil()
-            .let { BlockPos(
-                it.x.toInt(),
-                it.y.toInt(),
-                it.z.toInt(),
-            ) }
-
-        val centerOfShip = cornerOfShip.toJOMLD().add(offset)
-
-        val structureSettings = StructurePlaceSettings().addProcessor(
-            ICopyableProcessor(
-                SingleItemMap(fromId, toShip?.id ?: -1L, -1L) {it},
-                SingleItemMap(fromId, Pair(fromCenter, Vector3d(centerOfShip)), Pair(Vector3d(), Vector3d()))
-            )
-        )
-
-        structureSettings.rotationPivot = cornerOfShip
-
-        // Place blocks in the destination level (may be a dedicated shipyard dimension).
-        VSAssemblyEvents.onPasteBeforeBlocksAreLoaded.emit(VSAssemblyEvents.OnPasteBeforeBlocksAreLoaded(level, fromShip, toShip, Pair(fromCenter, centerOfShip), eventData))
-        val placed = template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
-        ASSEMBLY_LOGGER.info(
-            "[VS-DBG][moveBlocksFromTo] placeInWorld: placed={} corner={} minStructurePos={} maxStructurePos={} destDim={}",
-            placed, cornerOfShip, minStructurePos, maxStructurePos, destinationLevel.dimensionId
-        )
-        if (!placed) {
-            ASSEMBLY_LOGGER.warn(
-                "[VS-DBG][moveBlocksFromTo] placeInWorld FAILED — not removing original blocks or deleting ship. filteredBlocks={} destDim={} sourceDim={}",
-                filteredBlocks.size, destinationLevel.dimensionId, sourceLevel.dimensionId
-            )
-            return failedMove
         }
 
         // ========== Resume Chunk Updates
