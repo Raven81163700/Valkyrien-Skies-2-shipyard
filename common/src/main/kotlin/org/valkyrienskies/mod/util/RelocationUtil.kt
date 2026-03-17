@@ -120,3 +120,23 @@ fun updateBlock(level: Level, fromPos: BlockPos, toPos: BlockPos, toState: Block
  */
 fun Level.relocateBlock(from: BlockPos, to: BlockPos, doUpdate: Boolean, toShip: ServerShip?, rotation: Rotation) =
     relocateBlock(getChunkAt(from), from, getChunkAt(to), to, doUpdate, toShip, rotation)
+
+/**
+ * Cross-level block relocation: removes the block at [from] in [fromLevel] and places it
+ * at [to] in [toLevel].  Use this when assembling ships into a dedicated shipyard dimension.
+ *
+ * @param from source block position in [fromLevel]
+ * @param toLevel destination level (may be different from [fromLevel])
+ * @param to destination block position in [toLevel]
+ * @param doUpdate whether to send block-update and lighting packets
+ * @param toShip the ship that will own the destination block
+ * @param rotation block rotation to apply on placement
+ */
+fun Level.relocateBlockToDimension(
+    from: BlockPos,
+    toLevel: Level,
+    to: BlockPos,
+    doUpdate: Boolean,
+    toShip: ServerShip?,
+    rotation: Rotation
+) = relocateBlock(getChunkAt(from), from, toLevel.getChunkAt(to), to, doUpdate, toShip, rotation)

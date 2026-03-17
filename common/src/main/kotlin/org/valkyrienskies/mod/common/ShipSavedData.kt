@@ -16,6 +16,7 @@ class ShipSavedData : SavedData() {
         private const val QUERYABLE_SHIP_DATA_NBT_KEY = "queryable_ship_data"
         private const val CHUNK_ALLOCATOR_NBT_KEY = "chunk_allocator"
         private const val PIPELINE_NBT_KEY = "vs_pipeline"
+        private const val COMPACT_ALLOCATOR_NBT_KEY = "vs2_compact_allocator"
 
         fun createEmpty(): ShipSavedData {
             return ShipSavedData().apply { pipeline = vsCore.newPipeline() }
@@ -41,6 +42,15 @@ class ShipSavedData : SavedData() {
             } catch (ex: Exception) {
                 data.loadingException = ex
             }
+
+            // Restore the compact chunk allocator state (added in VS2 2.4.10+).
+            // The key is absent in old saves, in which case the allocator starts fresh.
+            if (compoundTag.contains(COMPACT_ALLOCATOR_NBT_KEY)) {
+                VS2CompactChunkAllocator.load(
+                    compoundTag.getCompound(COMPACT_ALLOCATOR_NBT_KEY)
+                )
+            }
+
             return data
         }
     }
@@ -52,6 +62,7 @@ class ShipSavedData : SavedData() {
 
     override fun save(compoundTag: CompoundTag): CompoundTag {
         compoundTag.putByteArray(PIPELINE_NBT_KEY, vsCore.serializePipeline(pipeline))
+        compoundTag.put(COMPACT_ALLOCATOR_NBT_KEY, VS2CompactChunkAllocator.save())
 
         return compoundTag
     }

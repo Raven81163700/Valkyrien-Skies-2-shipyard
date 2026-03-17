@@ -182,6 +182,27 @@ object VSGameConfig {
         var transformTeleports = true
 
         @ConfigEntry(
+            description = "If true, newly assembled ships are stored in the dedicated " +
+                "'valkyrienskies:shipyard' dimension instead of the player's current dimension. " +
+                "This keeps ship block coordinates below ~131 000 blocks from origin, which " +
+                "eliminates the float32 precision loss (visible gaps / 'distance phenomenon') " +
+                "that appears when ships are stored at the default high coordinates (~28 000 000). " +
+                "Requires the 'valkyrienskies:shipyard' dimension to be registered. " +
+                "Disabling this after ships have already been created in the shipyard dimension " +
+                "will make those ships inaccessible (their blocks remain in the shipyard dimension). " +
+                "For existing worlds, newly created ships will use the new dimension while old ones stay in place."
+        )
+        var useShipyardDimension = true
+
+        @ConfigEntry(
+            description = "If true, ship block-claim slots in the compact shipyard are allocated " +
+                "using the mod's own compact grid allocator (256×256 blocks per slot, spiral order " +
+                "from origin). This prevents ships from overlapping each other in the shipyard. " +
+                "Only relevant when useShipyardDimension is true."
+        )
+        var useCompactShipyard = true
+
+        @ConfigEntry(
             description = "By default, the server checks that player movement is legal, and if it isn't, " +
                 "rubber-bands the player with the infamous \"moved too quickly\" message. Since players on VS ships " +
                 "will move illegally, they will be affected by this check frequently. This option disables that " +

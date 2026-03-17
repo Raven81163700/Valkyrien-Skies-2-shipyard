@@ -1,0 +1,12 @@
+{
+  "type": "valkyrienskies:shipyard",
+  "generator": {
+    "type": "minecraft:flat",
+    "settings": {
+      "layers": [],
+      "biome": "minecraft:the_void",
+      "features": false,
+      "lakes": false
+    }
+  }
+}
