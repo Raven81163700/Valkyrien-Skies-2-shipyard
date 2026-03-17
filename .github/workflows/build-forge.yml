@@ -1,0 +1,99 @@
+name: Build Forge Mod
+
+# Triggers:
+#   • Every push to any 1.20.1/* branch (development branches for this MC version)
+#   • Pull requests targeting those branches
+#   • Manually via "Run workflow" button in the Actions tab
+on:
+  push:
+    branches:
+      - '1.20.1/*'
+  pull_request:
+    branches:
+      - '1.20.1/*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag (e.g. v2.4.10). Leave blank for a snapshot build.'
+        required: false
+        default: ''
+
+jobs:
+  build-forge:
+    name: Build Forge Mod
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true   # include vs-core submodule if present
+
+      # ── 2. Java ──────────────────────────────────────────────────────────────
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ── 3. Gradle cache ──────────────────────────────────────────────────────
+      - name: Cache Gradle files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            **/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ── 4. Read mod version ───────────────────────────────────────────────────
+      # Expose `mod_version` and `minecraft_version` from gradle.properties so we
+      # can use them in the artifact name below.
+      - name: Read mod version
+        id: version
+        run: |
+          MOD_VERSION=$(grep '^mod_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          MC_VERSION=$(grep '^minecraft_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          # If a manual release tag was supplied, use it as the version string.
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            MOD_VERSION="${{ github.event.inputs.release_tag }}"
+          fi
+          echo "mod_version=${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "mc_version=${MC_VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "artifact_name=valkyrienskies-${MC_VERSION}-forge-${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Build ──────────────────────────────────────────────────────────────
+      # `remapJar` produces the final, obf-mapped Forge mod JAR that players install.
+      - name: Build Forge mod (remapJar)
+        run: ./gradlew :forge:remapJar --no-daemon --stacktrace
+        env:
+          # Prevent the build from trying to reach external mavens that may be
+          # unreliable in CI (mirrors are fine via the VS maven).
+          block_external_repositories: false
+
+      # ── 6. Locate the built JAR ───────────────────────────────────────────────
+      - name: Locate built JAR
+        id: jar
+        run: |
+          JAR_PATH=$(find forge/build/libs -name "*.jar" \
+                       ! -name "*-dev.jar" \
+                       ! -name "*-sources.jar" \
+                       ! -name "*-shadow.jar" \
+                     | head -n 1)
+          echo "jar_path=${JAR_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Found JAR: ${JAR_PATH}"
+
+      # ── 7. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload Forge mod JAR
+        uses: actions/upload-artifact@v4
+        with:
+          # e.g.  valkyrienskies-1.20.1-forge-2.4.10
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: ${{ steps.jar.outputs.jar_path }}
+          # Keep the artifact for 30 days on regular builds, 90 on manual releases.
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 90 || 30 }}
+          if-no-files-found: error
