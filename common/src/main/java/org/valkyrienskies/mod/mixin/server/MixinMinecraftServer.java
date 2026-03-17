@@ -56,10 +56,12 @@ import org.valkyrienskies.core.internal.world.VsiServerShipWorld;
 import org.valkyrienskies.core.internal.world.VsiPipeline;
 import org.valkyrienskies.mod.common.IShipObjectWorldServerProvider;
 import org.valkyrienskies.mod.common.ShipSavedData;
+import org.valkyrienskies.mod.common.VS2CompactChunkAllocator;
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.mod.common.ValkyrienSkiesMod;
 import org.valkyrienskies.mod.common.config.DimensionParametersResolver;
 import org.valkyrienskies.mod.common.config.MassDatapackResolver;
+import org.valkyrienskies.mod.common.config.VSGameConfig;
 import org.valkyrienskies.mod.common.hooks.VSGameEvents;
 import org.valkyrienskies.mod.common.util.EntityDragger;
 import org.valkyrienskies.mod.common.util.ShipSettingsKt;
@@ -67,6 +69,7 @@ import org.valkyrienskies.mod.common.util.VSLevelChunk;
 import org.valkyrienskies.mod.common.util.VSServerLevel;
 import org.valkyrienskies.mod.common.util.VectorConversionsMCKt;
 import org.valkyrienskies.mod.common.world.ChunkManagement;
+import org.valkyrienskies.mod.common.world.ShipyardDimension;
 import org.valkyrienskies.mod.compat.LoadedMods;
 import org.valkyrienskies.mod.compat.Weather2Compat;
 import org.valkyrienskies.mod.util.KrunchSupport;
@@ -106,6 +109,8 @@ public abstract class MixinMinecraftServer implements IShipObjectWorldServerProv
     @Inject(at = @At("TAIL"), method = "stopServer")
     private void afterStopServer(final CallbackInfo ci) {
         ValkyrienSkiesMod.setCurrentServer(null);
+        // Clear the compact allocator state so it is re-loaded from the next world's saved data.
+        VS2CompactChunkAllocator.INSTANCE.clear();
     }
 
     @Nullable
@@ -181,6 +186,36 @@ public abstract class MixinMinecraftServer implements IShipObjectWorldServerProv
                 63.0,
                 962.0
             );
+        }
+
+        // Register the dedicated shipyard dimension with VS Core if it is enabled and loaded.
+        // The shipyard dimension stores ship blocks at compact low coordinates to avoid the
+        // float32 rendering precision issue ("distance phenomenon") at high coordinates.
+        if (VSGameConfig.SERVER.getUseShipyardDimension()) {
+            final net.minecraft.server.level.ServerLevel shipyardLevel =
+                ShipyardDimension.getLevel(MinecraftServer.class.cast(this));
+            if (shipyardLevel != null) {
+                final String shipyardDimId = VSGameUtilsKt.getDimensionId(shipyardLevel);
+                final DimensionParametersResolver.Parameters shipyardParams =
+                    DimensionParametersResolver.INSTANCE.getDimensionMap().get(shipyardDimId);
+                if (shipyardParams != null) {
+                    getShipObjectWorld().addDimension(
+                        shipyardDimId,
+                        VSGameUtilsKt.getYRange(shipyardLevel),
+                        shipyardParams.getGravity(),
+                        shipyardParams.getSeaLevel(),
+                        shipyardParams.getMaxY()
+                    );
+                } else {
+                    getShipObjectWorld().addDimension(
+                        shipyardDimId,
+                        VSGameUtilsKt.getYRange(shipyardLevel),
+                        McMathUtilKt.getDEFAULT_WORLD_GRAVITY(),
+                        0.0,
+                        256.0
+                    );
+                }
+            }
         }
     }
 

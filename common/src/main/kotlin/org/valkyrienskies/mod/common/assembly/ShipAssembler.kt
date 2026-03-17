@@ -43,6 +43,7 @@ import org.valkyrienskies.mod.common.util.SplittingDisablerAttachment
 import org.valkyrienskies.mod.common.util.toJOML
 import org.valkyrienskies.mod.common.util.toJOMLD
 import org.valkyrienskies.mod.common.vsCore
+import org.valkyrienskies.mod.common.world.ShipyardDimension
 import org.valkyrienskies.mod.common.yRange
 import org.valkyrienskies.mod.util.AIR
 import org.valkyrienskies.mod.util.StructureTemplateFillFromVoxelSet
@@ -121,10 +122,31 @@ object ShipAssembler {
         val oldScale = fromShip?.transform?.scaling?.x() ?: 1.0
         val worldOldCenter = fromShip?.shipToWorld?.transformPosition(fromCenter.get(Vector3d())) ?: fromCenter.get(Vector3d())
 
-        val toShip = level.shipObjectWorld.createNewShipAtBlock(Vector3i(worldOldCenter, RoundingMode.FLOOR), false, scale * oldScale, level.dimensionId)
+        // Determine which dimension ships should be stored in.
+        // When useShipyardDimension is enabled and the dedicated shipyard dimension is
+        // available, ship blocks are placed there instead of the player's dimension.
+        // This keeps shipyard coordinates small (< ~131 000 blocks) and avoids the
+        // float32 rendering precision loss ("distance phenomenon") at high coordinates.
+        val shipDimensionId = if (VSGameConfig.SERVER.useShipyardDimension) {
+            ShipyardDimension.getDimensionId(level.server) ?: level.dimensionId
+        } else {
+            level.dimensionId
+        }
+
+        val toShip = level.shipObjectWorld.createNewShipAtBlock(Vector3i(worldOldCenter, RoundingMode.FLOOR), false, scale * oldScale, shipDimensionId)
         toShip.isStatic = fromShip == null || fromShip.isStatic
 
-        val (wasSuccessful, _, toCenter) = moveBlocksFromTo(level, blocks, fromShip, toShip, minB, maxB, toShip.chunkClaim.getCenterBlockCoordinates(level.yRange, Vector3i()))
+        // Use the yRange and level of the dimension where blocks will actually be placed.
+        val shipLevel = if (VSGameConfig.SERVER.useShipyardDimension) {
+            ShipyardDimension.getLevel(level.server) ?: level
+        } else {
+            level
+        }
+        val (wasSuccessful, _, toCenter) = moveBlocksFromTo(
+            level, blocks, fromShip, toShip, minB, maxB,
+            toShip.chunkClaim.getCenterBlockCoordinates(shipLevel.yRange, Vector3i()),
+            destinationLevel = shipLevel
+        )
 
         if (!wasSuccessful) {
             level.shipObjectWorld.deleteShip(toShip)
@@ -164,7 +186,8 @@ object ShipAssembler {
         fromShip: ServerShip?, toShip: ServerShip?,
         minStructurePos: BlockPos, maxStructurePos: BlockPos,
         toCenter: Vector3i,
-        removeOriginal: Boolean = true)
+        removeOriginal: Boolean = true,
+        destinationLevel: ServerLevel = level)
     : MoveContext {
         val blocks = blocks.filter { level.getBlockState(it).let{!it.isAir && !it.inAssemblyBlacklist()} }.toSet()
         if (blocks.isEmpty()) return failedMove
@@ -216,7 +239,13 @@ object ShipAssembler {
             chunksToBeUpdated[sourcePos] = Pair(sourcePos, destPos)
         }
         val chunkPairs = chunksToBeUpdated.values.toList()
-        val chunkPoses = chunkPairs.flatMap { it.toList() }
+
+        // When assembling across dimensions, only pause/resume source chunks — the destination
+        // chunks are in the shipyard dimension which clients track separately.
+        val crossDimension = destinationLevel !== level
+        val sourceChunkPoses = chunkPairs.map { it.first }
+        val destChunkPoses = chunkPairs.map { it.second }
+        val chunkPoses = if (crossDimension) sourceChunkPoses else chunkPairs.flatMap { it.toList() }
         val chunkPosesJOML = chunkPoses.map { it.toJOML() }
 
         level.players().forEach { player ->
@@ -286,20 +315,25 @@ object ShipAssembler {
 
         structureSettings.rotationPivot = cornerOfShip
 
+        // Place blocks in the destination level (may be a dedicated shipyard dimension).
         VSAssemblyEvents.onPasteBeforeBlocksAreLoaded.emit(VSAssemblyEvents.OnPasteBeforeBlocksAreLoaded(level, fromShip, toShip, Pair(fromCenter, centerOfShip), eventData))
-        template.placeInWorld(level, cornerOfShip, cornerOfShip, structureSettings, level.random, Block.UPDATE_CLIENTS)
+        template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
 
         // ========== Resume Chunk Updates
+        // Wait until the destination chunks are ticking before resuming client chunk updates.
+        val tickingCheckPoses = if (crossDimension) sourceChunkPoses else chunkPoses
+        val tickingLevel = if (crossDimension) level else destinationLevel
+
         val timeAtExecution = level.server.tickCount
         level.server.executeIf(
             // This condition will return true if all modified chunks have been both loaded AND
             // chunk update packets were sent to players
-            { chunkPoses.all(level::isTickingChunk) || level.server.tickCount - timeAtExecution > 60 }
+            { tickingCheckPoses.all(tickingLevel::isTickingChunk) || level.server.tickCount - timeAtExecution > 60 }
         ) {
             if (level.server.tickCount - timeAtExecution > 60) {
                 ASSEMBLY_LOGGER.warn("Timed out waiting for chunks to start ticking after assembly! Forcibly resuming...")
                 ASSEMBLY_LOGGER.warn("All chunks involved in assembly: $chunkPoses")
-                ASSEMBLY_LOGGER.warn("Chunks that were supposed to be ticking: ${chunkPoses.filterNot { level.isTickingChunk(it) }}")
+                ASSEMBLY_LOGGER.warn("Chunks that were supposed to be ticking: ${tickingCheckPoses.filterNot { tickingLevel.isTickingChunk(it) }}")
             }
             // Once all the chunk updates are sent to players, we can tell them to restart chunk updates
             level.players().forEach { player ->
@@ -311,16 +345,18 @@ object ShipAssembler {
             VSAssemblyEvents.onPasteAfterBlocksAreLoaded.emit(VSAssemblyEvents.OnPasteAfterBlocksAreLoaded(level, fromShip, toShip, Pair(fromCenter, centerOfShip), eventData))
             //force update connectivity because this new assemblyslop doesn't update it :(
             if (VSCoreConfig.SERVER.sp.enableConnectivity) {
-                for (pos in chunkPoses) {
-                    val worldChunk = level.getChunk(pos.x, pos.z) ?: continue
+                // Connectivity must be updated for the destination dimension (where ship blocks are placed).
+                val connectivityPoses = destChunkPoses
+                for (pos in connectivityPoses) {
+                    val worldChunk = destinationLevel.getChunk(pos.x, pos.z) ?: continue
                     val chunkSections = worldChunk.sections ?: continue
                     for (sectionY in 0 until worldChunk.sectionsCount) {
                         val sectionPos = Vector3i(pos.x, worldChunk.getSectionYFromSectionIndex(sectionY), pos.z)
                         val section = chunkSections[sectionY] ?: continue
                         if (section.hasOnlyAir()) continue
                         val update = section.toDenseVoxelUpdate(sectionPos)
-                        level.shipObjectWorld.forceUpdateConnectivityChunk(
-                            level.dimensionId,
+                        destinationLevel.shipObjectWorld.forceUpdateConnectivityChunk(
+                            destinationLevel.dimensionId,
                             sectionPos.x,
                             sectionPos.y,
                             sectionPos.z,
@@ -368,12 +404,21 @@ object ShipAssembler {
         }
         if (deleteBlocks) {
             val aabb = ship.shipAABB ?: return 0
+            // Blocks may be in a different dimension (e.g. the dedicated shipyard dimension).
+            // Resolve the level where the ship's blocks actually live.
+            val blockLevel = if (ship.chunkClaimDimension != level.dimensionId) {
+                level.server.allLevels
+                    .firstOrNull { l -> l.dimensionId == ship.chunkClaimDimension }
+                    ?: level
+            } else {
+                level
+            }
             aabb.forEach { x, y, z ->
                 if (dropBlocks)
-                    level.destroyBlock(BlockPos(x, y, z), true)
+                    blockLevel.destroyBlock(BlockPos(x, y, z), true)
                 else
                     // Not sure if 2 is what we want, but it's what /fill uses
-                    level.setBlock(BlockPos(x, y, z), Blocks.AIR.defaultBlockState(), 2)
+                    blockLevel.setBlock(BlockPos(x, y, z), Blocks.AIR.defaultBlockState(), 2)
             }
         }
 
