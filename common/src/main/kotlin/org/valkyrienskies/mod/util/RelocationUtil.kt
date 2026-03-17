@@ -32,8 +32,10 @@ fun relocateBlock(
 ) {
     var state = fromChunk.getBlockState(from)
     val entity = fromChunk.getBlockEntity(from)
-	val level = toChunk.level
-	
+    // Track both levels so cross-dimension relocation uses the correct level for each side.
+    val fromLevel = fromChunk.level
+    val toLevel = toChunk.level
+
     val tag = entity?.let {
         val tag = it.saveWithFullMetadata()
         tag.putInt("x", to.x)
@@ -42,10 +44,10 @@ fun relocateBlock(
 
         // so that it won't drop its contents
         if (it is Clearable) {
-			val blockEntity = it as BlockEntity
-			val emptyTag = CompoundTag()
+            val blockEntity = it as BlockEntity
+            val emptyTag = CompoundTag()
             blockEntity.load(emptyTag)
-			
+
             //it.clearContent()
         }
 
@@ -53,7 +55,8 @@ fun relocateBlock(
         if (it is RandomizableContainerBlockEntity) {
             it.setLootTable(null, 0)
         }
-		level.removeBlockEntity(from)
+        // Use the source level to remove the block entity from the correct dimension.
+        fromLevel.removeBlockEntity(from)
         tag
     }
 
@@ -63,12 +66,39 @@ fun relocateBlock(
     toChunk.setBlockState(to, state, false)
 
     if (doUpdate) {
-        updateBlock(level, from, to, state)
+        if (fromLevel === toLevel) {
+            // Same dimension: the existing helper covers both positions correctly.
+            updateBlock(toLevel, from, to, state)
+        } else {
+            // Cross-dimension: send block-update notifications on the correct level for each
+            // position so that clients in the source dimension see the removal and clients
+            // (or VS Core) watching the destination dimension see the placement.
+            val flags = 11 or Block.UPDATE_MOVE_BY_PISTON or Block.UPDATE_SUPPRESS_DROPS
+            val recursionLeft = 511
+
+            // Source-side removal notifications.
+            fromLevel.setBlocksDirty(from, state, AIR)
+            fromLevel.sendBlockUpdated(from, state, AIR, flags)
+            fromLevel.blockUpdated(from, AIR.block)
+            AIR.updateIndirectNeighbourShapes(fromLevel, from, flags, recursionLeft - 1)
+            AIR.updateNeighbourShapes(fromLevel, from, flags, recursionLeft)
+            AIR.updateIndirectNeighbourShapes(fromLevel, from, flags, recursionLeft)
+            fromLevel.chunkSource.lightEngine.checkBlock(from)
+
+            // Destination-side placement notifications.
+            toLevel.setBlocksDirty(to, AIR, state)
+            toLevel.sendBlockUpdated(to, AIR, state, flags)
+            toLevel.blockUpdated(to, state.block)
+            if (!toLevel.isClientSide && state.hasAnalogOutputSignal()) {
+                toLevel.updateNeighbourForOutputSignal(to, state.block)
+            }
+            toLevel.chunkSource.lightEngine.checkBlock(to)
+        }
     }
 
     tag?.let {
-        val be = level.getBlockEntity(to)!!
-
+        // Retrieve the block entity from the destination level.
+        val be = toLevel.getBlockEntity(to)!!
         be.load(it)
     }
 }

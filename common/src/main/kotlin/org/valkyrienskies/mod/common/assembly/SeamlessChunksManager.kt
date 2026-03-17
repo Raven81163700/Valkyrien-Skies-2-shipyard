@@ -13,7 +13,6 @@ import org.valkyrienskies.core.api.ships.ClientShip
 import org.valkyrienskies.core.api.ships.properties.ChunkClaim
 import org.valkyrienskies.core.util.pollUntilEmpty
 import org.valkyrienskies.mod.api.vsApi
-import org.valkyrienskies.mod.common.getShipManagingPos
 import org.valkyrienskies.mod.common.isChunkInShipyard
 import org.valkyrienskies.mod.common.networking.PacketRestartChunkUpdates
 import org.valkyrienskies.mod.common.networking.PacketStopChunkUpdates
@@ -113,9 +112,15 @@ class SeamlessChunksManager(private val listener: ClientPacketListener) {
         // so if any updates in there are actually still stalled by a [PacketStopChunkUpdates] it will
         // be added to the queuedUpdates queue here (and vice versa)
 
-        // The chunk is in the shipyard, but we don't know what ship
+        // The chunk is in the shipyard, but we don't know what ship.
+        // Use a dimension-agnostic check: when the useShipyardDimension feature is enabled,
+        // a ship's chunk claim lives in the dedicated shipyard dimension rather than the
+        // player's current dimension. getShipManagingPos() only searches in the player's
+        // dimension, so it would always return null for those ships and defer the chunk
+        // packet forever.  Instead, we check whether ANY loaded ship (from any dimension)
+        // claims these chunk coordinates via ChunkClaim.contains().
         if (level.isChunkInShipyard(chunkX, chunkZ) &&
-            level.getShipManagingPos(chunkX, chunkZ) == null
+            level.shipObjectWorld.allShips.none { ship -> ship.chunkClaim.contains(chunkX, chunkZ) }
         ) {
             logger.debug("Deferring ship update at <$chunkX, $chunkZ> for ${packet::class}")
             shipQueuedUpdates
