@@ -308,7 +308,7 @@ object ShipAssembler {
         )
         if (!placed) {
             ASSEMBLY_LOGGER.warn(
-                "[VS-DBG][moveBlocksFromTo] placeInWorld FAILED — original blocks NOT removed. filteredBlocks={} destDim={} sourceDim={}",
+                "[VS-DBG][moveBlocksFromTo] placeInWorld FAILED — original blocks not removed. filteredBlocks={} destDim={} sourceDim={}",
                 filteredBlocks.size, destinationLevel.dimensionId, sourceLevel.dimensionId
             )
             // Resume chunk updates immediately — no blocks were moved, clients should not stay frozen.

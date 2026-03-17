@@ -73,7 +73,10 @@ fun relocateBlock(
             // Cross-dimension: send block-update notifications on the correct level for each
             // position so that clients in the source dimension see the removal and clients
             // (or VS Core) watching the destination dimension see the placement.
+            // 11 = flag 1 (block update) | flag 2 (send to clients) | flag 8 (force rerenders)
             val flags = 11 or Block.UPDATE_MOVE_BY_PISTON or Block.UPDATE_SUPPRESS_DROPS
+            // 511 matches the recursion limit used throughout the rest of the VS2 block-update
+            // code (see ShipAssembler.moveBlocksFromTo and the updateBlock helper below).
             val recursionLeft = 511
 
             // Source-side removal notifications.
