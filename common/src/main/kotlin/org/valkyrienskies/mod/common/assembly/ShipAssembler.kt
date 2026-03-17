@@ -143,8 +143,13 @@ object ShipAssembler {
             level
         }
         val (wasSuccessful, _, toCenter) = moveBlocksFromTo(
-            level, blocks, fromShip, toShip, minB, maxB,
-            toShip.chunkClaim.getCenterBlockCoordinates(shipLevel.yRange, Vector3i()),
+            level = level,
+            blocks = blocks,
+            fromShip = fromShip,
+            toShip = toShip,
+            minStructurePos = minB,
+            maxStructurePos = maxB,
+            toCenter = toShip.chunkClaim.getCenterBlockCoordinates(shipLevel.yRange, Vector3i()),
             destinationLevel = shipLevel
         )
 
@@ -182,6 +187,7 @@ object ShipAssembler {
     @OptIn(GameTickOnly::class)
     fun moveBlocksFromTo(
         level: ServerLevel,
+        sourceLevel: ServerLevel = level,
         blocks: Set<BlockPos>,
         fromShip: ServerShip?, toShip: ServerShip?,
         minStructurePos: BlockPos, maxStructurePos: BlockPos,
@@ -189,8 +195,13 @@ object ShipAssembler {
         removeOriginal: Boolean = true,
         destinationLevel: ServerLevel = level)
     : MoveContext {
-        val blocks = blocks.filter { level.getBlockState(it).let{!it.isAir && !it.inAssemblyBlacklist()} }.toSet()
-        if (blocks.isEmpty()) return failedMove
+        ASSEMBLY_LOGGER.debug(
+            "moveBlocksFromTo: sourceLevel={}, destinationLevel={}, blocks={} (pre-filter)",
+            sourceLevel.dimension(), destinationLevel.dimension(), blocks.size
+        )
+        val filteredBlocks = blocks.filter { sourceLevel.getBlockState(it).let{!it.isAir && !it.inAssemblyBlacklist()} }.toSet()
+        ASSEMBLY_LOGGER.debug("moveBlocksFromTo: filteredBlocks={}", filteredBlocks.size)
+        if (filteredBlocks.isEmpty()) return failedMove
 
         val fromId = fromShip?.id ?: -1L
         val eventData = mutableMapOf<String, CompoundTag>()
@@ -212,12 +223,12 @@ object ShipAssembler {
         }
 
         // ========== Copy Blocks
-        VSAssemblyEvents.beforeCopy.emit(VSAssemblyEvents.BeforeCopy(level, oldMin, oldMax, fromCenter, fromShip, blocks, eventData))
+        VSAssemblyEvents.beforeCopy.emit(VSAssemblyEvents.BeforeCopy(level, oldMin, oldMax, fromCenter, fromShip, filteredBlocks, eventData))
 
         val template = StructureTemplate()
         template as StructureTemplateFillFromVoxelSet
         template.`vs$fillFromVoxelSet`(
-            level, blocks,
+            sourceLevel, filteredBlocks,
             fromShip?.let { listOf(it) } ?: emptyList(),
             SingleItemMap(fromId, fromCenter, Vector3d()),
             minStructurePos, maxStructurePos
@@ -234,7 +245,7 @@ object ShipAssembler {
         val deltaZ = fromChunkZ - toChunkCenter.z
 
         val chunksToBeUpdated = mutableMapOf<ChunkPos, Pair<ChunkPos, ChunkPos>>()
-        getDistinctChunksFromBlockPosSet(blocks).forEach { sourcePos ->
+        getDistinctChunksFromBlockPosSet(filteredBlocks).forEach { sourcePos ->
             val destPos = ChunkPos(sourcePos.x - deltaX, sourcePos.z - deltaZ)
             chunksToBeUpdated[sourcePos] = Pair(sourcePos, destPos)
         }
@@ -242,7 +253,7 @@ object ShipAssembler {
 
         // When assembling across dimensions, only pause/resume source chunks — the destination
         // chunks are in the shipyard dimension which clients track separately.
-        val crossDimension = destinationLevel !== level
+        val crossDimension = destinationLevel !== sourceLevel
         val sourceChunkPoses = chunkPairs.map { it.first }
         val destChunkPoses = chunkPairs.map { it.second }
         val chunkPoses = if (crossDimension) sourceChunkPoses else chunkPairs.flatMap { it.toList() }
@@ -257,8 +268,8 @@ object ShipAssembler {
 
         // ========== Removing Old Blocks
         if (removeOriginal) {
-            for (pos in blocks) {
-                level.getBlockEntity(pos)?.let {
+            for (pos in filteredBlocks) {
+                sourceLevel.getBlockEntity(pos)?.let {
                     if (it is Clearable) {
                         Clearable.tryClear(it)
                     } else {
@@ -266,29 +277,29 @@ object ShipAssembler {
                         it.load(CompoundTag())
                     }
                     // Without this, copycats still drop their items
-                    level.removeBlockEntity(pos)
+                    sourceLevel.removeBlockEntity(pos)
                 }
 
-                level.setBlock(pos, Blocks.BARRIER.defaultBlockState(), Block.UPDATE_CLIENTS)
+                sourceLevel.setBlock(pos, Blocks.BARRIER.defaultBlockState(), Block.UPDATE_CLIENTS)
             }
-            for (pos in blocks) {
-                val block = level.getBlockState(pos)
-                level.removeBlock(pos, false)
+            for (pos in filteredBlocks) {
+                val block = sourceLevel.getBlockState(pos)
+                sourceLevel.removeBlock(pos, false)
                 // 75 = flag 1 (block update) & flag 2 (send to clients) + flag 8 (force rerenders)
                 val flags = 11 or Block.UPDATE_MOVE_BY_PISTON or Block.UPDATE_SUPPRESS_DROPS
 
                 //updateNeighbourShapes recurses through nearby blocks, recursionLeft is the limit
                 val recursionLeft = 511
 
-                level.setBlocksDirty(pos, block, AIR)
-                level.sendBlockUpdated(pos, block, AIR, flags)
-                level.blockUpdated(pos, AIR.block)
+                sourceLevel.setBlocksDirty(pos, block, AIR)
+                sourceLevel.sendBlockUpdated(pos, block, AIR, flags)
+                sourceLevel.blockUpdated(pos, AIR.block)
                 // This handles the update for neighboring blocks in worldspace
-                AIR.updateIndirectNeighbourShapes(level, pos, flags, recursionLeft - 1)
-                AIR.updateNeighbourShapes(level, pos, flags, recursionLeft)
-                AIR.updateIndirectNeighbourShapes(level, pos, flags, recursionLeft)
+                AIR.updateIndirectNeighbourShapes(sourceLevel, pos, flags, recursionLeft - 1)
+                AIR.updateNeighbourShapes(sourceLevel, pos, flags, recursionLeft)
+                AIR.updateIndirectNeighbourShapes(sourceLevel, pos, flags, recursionLeft)
                 //This updates lighting for blocks in worldspace
-                level.chunkSource.lightEngine.checkBlock(pos)
+                sourceLevel.chunkSource.lightEngine.checkBlock(pos)
             }
         }
         // ========== Placing New Blocks
@@ -320,9 +331,9 @@ object ShipAssembler {
         template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
 
         // ========== Resume Chunk Updates
-        // Wait until the destination chunks are ticking before resuming client chunk updates.
+        // Wait until the source chunks are ticking before resuming client chunk updates.
         val tickingCheckPoses = if (crossDimension) sourceChunkPoses else chunkPoses
-        val tickingLevel = if (crossDimension) level else destinationLevel
+        val tickingLevel = if (crossDimension) sourceLevel else destinationLevel
 
         val timeAtExecution = level.server.tickCount
         level.server.executeIf(
@@ -397,6 +408,101 @@ object ShipAssembler {
         return !state.inAssemblyBlacklist()
     }
 
+    /**
+     * Resolves the [ServerLevel] in which [ship]'s blocks physically reside.
+     *
+     * When [VSGameConfig.SERVER.useShipyardDimension] is enabled, a ship's blocks may live in a
+     * dedicated dimension whose ID is stored in [ServerShip.chunkClaimDimension].  If that
+     * dimension can't be resolved at runtime, [level] is returned as a safe fallback.
+     */
+    private fun resolveShipSourceLevel(level: ServerLevel, ship: ServerShip): ServerLevel =
+        if (ship.chunkClaimDimension != level.dimensionId) {
+            level.server.allLevels.firstOrNull { it.dimensionId == ship.chunkClaimDimension } ?: level
+        } else {
+            level
+        }
+
+    /**
+     * Physicalizes (disassembles) a ship back into static world blocks at its current world position.
+     *
+     * When [VSGameConfig.SERVER.useShipyardDimension] is enabled, the ship's blocks reside in the
+     * dedicated shipyard dimension rather than [level].  This function resolves the correct source
+     * level from [ServerShip.chunkClaimDimension] so that blocks are read/deleted from the right
+     * dimension and placed into [level] (the main world).
+     *
+     * @param level  The main-world [ServerLevel] where blocks will be placed.
+     * @param ship   The ship to physicalize.
+     * @return `true` if the operation succeeded, `false` if the ship had no blocks or placement failed.
+     */
+    @JvmStatic
+    @OptIn(GameTickOnly::class)
+    fun disassembleShip(level: ServerLevel, ship: ServerShip): Boolean {
+        // Resolve the level where the ship's blocks actually live.
+        val sourceLevel = resolveShipSourceLevel(level, ship)
+
+        ASSEMBLY_LOGGER.debug(
+            "disassembleShip: ship={}, sourceLevel={}, destinationLevel={}",
+            ship.id, sourceLevel.dimension(), level.dimension()
+        )
+
+        val aabb = ship.shipAABB ?: run {
+            ASSEMBLY_LOGGER.warn("disassembleShip: ship {} has no shipAABB, aborting", ship.id)
+            return false
+        }
+
+        // Collect all non-air, non-blacklisted blocks from the ship's AABB in the source level.
+        val shipBlocks = mutableSetOf<BlockPos>()
+        aabb.forEach { x, y, z ->
+            val pos = BlockPos(x, y, z)
+            val state = sourceLevel.getBlockState(pos)
+            if (!state.isAir && !state.inAssemblyBlacklist()) {
+                shipBlocks.add(pos)
+            }
+        }
+
+        if (shipBlocks.isEmpty()) {
+            ASSEMBLY_LOGGER.warn("disassembleShip: no valid blocks found for ship {} in {}", ship.id, sourceLevel.dimension())
+            return false
+        }
+
+        val (minPos, maxPos) = findMinAndMax(shipBlocks)
+
+        // Compute the destination center in world space using the ship's current transform.
+        // ship.shipToWorld maps ship-space (shipyard) coordinates to world coordinates.
+        val centerInShip = Vector3d(
+            (minPos.x + maxPos.x) / 2.0,
+            (minPos.y + maxPos.y) / 2.0,
+            (minPos.z + maxPos.z) / 2.0
+        )
+        val centerInWorld = ship.shipToWorld.transformPosition(centerInShip)
+        val toCenter = Vector3i(
+            centerInWorld.x.toInt(),
+            centerInWorld.y.toInt(),
+            centerInWorld.z.toInt()
+        )
+
+        val (wasSuccessful, _, _) = moveBlocksFromTo(
+            level = level,
+            sourceLevel = sourceLevel,
+            blocks = shipBlocks,
+            fromShip = ship,
+            toShip = null,
+            minStructurePos = minPos,
+            maxStructurePos = maxPos,
+            toCenter = toCenter,
+            removeOriginal = true,
+            destinationLevel = level
+        )
+
+        if (wasSuccessful) {
+            vsCore.deleteShips(level.shipObjectWorld, listOf(ship))
+        } else {
+            ASSEMBLY_LOGGER.error("disassembleShip: moveBlocksFromTo failed for ship {}", ship.id)
+        }
+
+        return wasSuccessful
+    }
+
     fun deleteShip(level: ServerLevel, ship: ServerShip, deleteBlocks: Boolean, dropBlocks: Boolean): Int {
         if (ship is LoadedServerShip) {
             val splittingDisabler = ship.getAttachment(SplittingDisablerAttachment::class.java)
@@ -405,14 +511,7 @@ object ShipAssembler {
         if (deleteBlocks) {
             val aabb = ship.shipAABB ?: return 0
             // Blocks may be in a different dimension (e.g. the dedicated shipyard dimension).
-            // Resolve the level where the ship's blocks actually live.
-            val blockLevel = if (ship.chunkClaimDimension != level.dimensionId) {
-                level.server.allLevels
-                    .firstOrNull { l -> l.dimensionId == ship.chunkClaimDimension }
-                    ?: level
-            } else {
-                level
-            }
+            val blockLevel = resolveShipSourceLevel(level, ship)
             aabb.forEach { x, y, z ->
                 if (dropBlocks)
                     blockLevel.destroyBlock(BlockPos(x, y, z), true)
