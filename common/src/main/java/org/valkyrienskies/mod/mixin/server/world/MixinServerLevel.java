@@ -53,6 +53,7 @@ import org.valkyrienskies.mod.common.ValkyrienSkiesMod;
 import org.valkyrienskies.mod.common.block.WingBlock;
 import org.valkyrienskies.mod.common.config.DimensionParametersResolver;
 import org.valkyrienskies.mod.common.util.DragInfoReporter;
+import org.valkyrienskies.mod.common.world.ShipyardDimension;
 import org.valkyrienskies.mod.common.util.VSServerLevel;
 import org.valkyrienskies.mod.common.util.VectorConversionsMCKt;
 import org.valkyrienskies.mod.mixin.accessors.server.level.ChunkMapAccessor;
@@ -89,8 +90,7 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
 
     @Nullable
     @Override
-    public VsiServerShipWorld getShipObjectWorld() {
-        return ((IShipObjectWorldServerProvider) getServer()).getShipObjectWorld();
+    public VsiServerShipWorld getShipObjectWorld() {        return ((IShipObjectWorldServerProvider) getServer()).getShipObjectWorld();
     }
 
     @Inject(method = "<init>", at = @At("RETURN"))
@@ -100,13 +100,23 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
 
         // This only happens when overworld gets loaded on startup, we have a mixin in MixinMinecraftServer for this specific case
         if (getShipObjectWorld() != null) {
+            final ServerLevel self = (ServerLevel) (Object) this;
+
+            // The shipyard dimension is registered exclusively by MixinMinecraftServer.postCreateLevelsTail()
+            // (at the TAIL of createLevels) using a vs$shipyardDimRegistered guard to prevent duplicates.
+            // If we also registered it here we would bypass that guard and call addDimension() twice on
+            // Forge (where custom-dimension ServerLevels are constructed *during* createLevels, so
+            // getShipObjectWorld() is already non-null by the time this @Inject fires for the shipyard
+            // level) — producing "IllegalArgumentException: Failed requirement" from VS Core's require().
+            if (ShipyardDimension.DIMENSION_KEY.equals(self.dimension())) return;
+
             DimensionParametersResolver.Parameters params = DimensionParametersResolver.INSTANCE.getDimensionMap().get(
-                VSGameUtilsKt.getDimensionId((ServerLevel) (Object) this)
+                VSGameUtilsKt.getDimensionId(self)
             );
             if (params != null) {
                 getShipObjectWorld().addDimension(
-                    VSGameUtilsKt.getDimensionId((ServerLevel) (Object) this),
-                    VSGameUtilsKt.getYRange((ServerLevel) (Object) this),
+                    VSGameUtilsKt.getDimensionId(self),
+                    VSGameUtilsKt.getYRange(self),
                     params.getGravity(),
                     params.getSeaLevel(),
                     params.getMaxY()
@@ -114,8 +124,8 @@ public abstract class MixinServerLevel implements IShipObjectWorldServerProvider
                 return;
             }
             getShipObjectWorld().addDimension(
-                VSGameUtilsKt.getDimensionId((ServerLevel) (Object) this),
-                VSGameUtilsKt.getYRange((ServerLevel) (Object) this),
+                VSGameUtilsKt.getDimensionId(self),
+                VSGameUtilsKt.getYRange(self),
                 McMathUtilKt.getDEFAULT_WORLD_GRAVITY(),
                 AerodynamicUtils.DEFAULT_SEA_LEVEL,
                 AerodynamicUtils.DEFAULT_MAX
