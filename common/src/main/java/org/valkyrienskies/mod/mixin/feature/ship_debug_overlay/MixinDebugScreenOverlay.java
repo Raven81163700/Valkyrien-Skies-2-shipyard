@@ -1,6 +1,5 @@
 package org.valkyrienskies.mod.mixin.feature.ship_debug_overlay;
 
-import com.llamalad7.mixinextras.sugar.Local;
 import java.util.List;
 import java.util.Locale;
 import net.minecraft.ChatFormatting;
@@ -45,29 +44,31 @@ public abstract class MixinDebugScreenOverlay {
         }
     }
 
-    @Inject(method = "getGameInformation", at = @At(value = "INVOKE", target = "Ljava/util/List;add(Ljava/lang/Object;)Z", ordinal = 6, shift = At.Shift.AFTER))
-    private void addPlayerDraggingInformation(CallbackInfoReturnable<List<String>> cir, @Local List<String> list) {
-        EntityDraggingInformation info = ((IEntityDraggingInformationProvider)minecraft.player).getDraggingInformation();
+    @Inject(method = "getGameInformation", at = @At("RETURN"))
+    private void addPlayerDraggingInformation(CallbackInfoReturnable<List<String>> cir) {
+        EntityDraggingInformation info = ((IEntityDraggingInformationProvider) minecraft.player).getDraggingInformation();
         if (info != null) {
             if (info.isEntityBeingDraggedByAShip()) {
                 Long shipId = info.getLastShipStoodOn();
                 if (shipId != null) {
                     Ship ship = VSGameUtilsKt.getAllShips(getLevel()).getById(shipId);
                     if (ship != null) {
-                        list.add("Dragged by: " + VSGameUtilsKt.getAllShips(getLevel()).getById(info.getLastShipStoodOn()).getSlug());
+                        cir.getReturnValue().add("Dragged by: " + ship.getSlug());
                     }
                 }
             }
         }
     }
 
-    @Inject(method = "getSystemInformation", at = @At(value = "INVOKE", target = "Ljava/util/List;add(Ljava/lang/Object;)Z", ordinal = 0))
-    private void addShipInformation(CallbackInfoReturnable<List<String>> cir, @Local List<String> list) {
+    @Inject(method = "getSystemInformation", at = @At("RETURN"))
+    private void addShipInformation(CallbackInfoReturnable<List<String>> cir) {
         Level l = getLevel();
+        if (!(this.block instanceof BlockHitResult)) return;
         BlockPos blockPos = ((BlockHitResult) this.block).getBlockPos();
         Ship ship = VSGameUtilsKt.getShipManagingPos(l, blockPos);
         LoadedServerShip lsship = l instanceof ServerLevel ? VSGameUtilsKt.getLoadedShipManagingPos((ServerLevel) l, blockPos) : null;
         if (ship != null) {
+            List<String> list = cir.getReturnValue();
             list.add("");
             list.add(ChatFormatting.UNDERLINE + "Targeted Ship: " + ship.getSlug());
             if (lsship != null) {
