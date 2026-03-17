@@ -195,13 +195,20 @@ object ShipAssembler {
         removeOriginal: Boolean = true,
         destinationLevel: ServerLevel = level)
     : MoveContext {
-        ASSEMBLY_LOGGER.debug(
-            "moveBlocksFromTo: sourceLevel={}, destinationLevel={}, blocks={} (pre-filter)",
-            sourceLevel.dimension(), destinationLevel.dimension(), blocks.size
+        ASSEMBLY_LOGGER.info(
+            "[VS-DBG][moveBlocksFromTo] enter: levelDim={} sourceDim={} destDim={} inputBlocks={} removeOriginal={} fromShip={} toShip={}",
+            level.dimensionId, sourceLevel.dimensionId, destinationLevel.dimensionId,
+            blocks.size, removeOriginal, fromShip?.id, toShip?.id
         )
         val filteredBlocks = blocks.filter { sourceLevel.getBlockState(it).let{!it.isAir && !it.inAssemblyBlacklist()} }.toSet()
-        ASSEMBLY_LOGGER.debug("moveBlocksFromTo: filteredBlocks={}", filteredBlocks.size)
-        if (filteredBlocks.isEmpty()) return failedMove
+        ASSEMBLY_LOGGER.info("[VS-DBG][moveBlocksFromTo] filtered: filteredBlocks={}", filteredBlocks.size)
+        if (filteredBlocks.isEmpty()) {
+            ASSEMBLY_LOGGER.warn(
+                "[VS-DBG][moveBlocksFromTo] filtered: filteredBlocks is EMPTY — source dim={} had no valid blocks at the given positions (all air or blacklisted). Returning failedMove.",
+                sourceLevel.dimensionId
+            )
+            return failedMove
+        }
 
         val fromId = fromShip?.id ?: -1L
         val eventData = mutableMapOf<String, CompoundTag>()
@@ -268,6 +275,11 @@ object ShipAssembler {
 
         // ========== Removing Old Blocks
         if (removeOriginal) {
+            ASSEMBLY_LOGGER.info(
+                "[VS-DBG][moveBlocksFromTo] removeOriginal: entering removal phase, sourceDim={} count={}",
+                sourceLevel.dimensionId, filteredBlocks.size
+            )
+            var removedCount = 0
             for (pos in filteredBlocks) {
                 sourceLevel.getBlockEntity(pos)?.let {
                     if (it is Clearable) {
@@ -281,6 +293,7 @@ object ShipAssembler {
                 }
 
                 sourceLevel.setBlock(pos, Blocks.BARRIER.defaultBlockState(), Block.UPDATE_CLIENTS)
+                removedCount++
             }
             for (pos in filteredBlocks) {
                 val block = sourceLevel.getBlockState(pos)
@@ -301,6 +314,10 @@ object ShipAssembler {
                 //This updates lighting for blocks in worldspace
                 sourceLevel.chunkSource.lightEngine.checkBlock(pos)
             }
+            ASSEMBLY_LOGGER.info(
+                "[VS-DBG][moveBlocksFromTo] removeOriginal: done, removedCount={} sourceDim={}",
+                removedCount, sourceLevel.dimensionId
+            )
         }
         // ========== Placing New Blocks
 
@@ -328,7 +345,18 @@ object ShipAssembler {
 
         // Place blocks in the destination level (may be a dedicated shipyard dimension).
         VSAssemblyEvents.onPasteBeforeBlocksAreLoaded.emit(VSAssemblyEvents.OnPasteBeforeBlocksAreLoaded(level, fromShip, toShip, Pair(fromCenter, centerOfShip), eventData))
-        template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
+        val placed = template.placeInWorld(destinationLevel, cornerOfShip, cornerOfShip, structureSettings, destinationLevel.random, Block.UPDATE_CLIENTS)
+        ASSEMBLY_LOGGER.info(
+            "[VS-DBG][moveBlocksFromTo] placeInWorld: placed={} corner={} minStructurePos={} maxStructurePos={} destDim={}",
+            placed, cornerOfShip, minStructurePos, maxStructurePos, destinationLevel.dimensionId
+        )
+        if (!placed) {
+            ASSEMBLY_LOGGER.warn(
+                "[VS-DBG][moveBlocksFromTo] placeInWorld FAILED — not removing original blocks or deleting ship. filteredBlocks={} destDim={} sourceDim={}",
+                filteredBlocks.size, destinationLevel.dimensionId, sourceLevel.dimensionId
+            )
+            return failedMove
+        }
 
         // ========== Resume Chunk Updates
         // Wait until the source chunks are ticking before resuming client chunk updates.
@@ -385,6 +413,10 @@ object ShipAssembler {
             }
         }
 
+        ASSEMBLY_LOGGER.info(
+            "[VS-DBG][moveBlocksFromTo] result: SUCCESS filteredBlocks={} placed={} removeOriginal={} sourceDim={} destDim={}",
+            filteredBlocks.size, placed, removeOriginal, sourceLevel.dimensionId, destinationLevel.dimensionId
+        )
         return MoveContext(true, fromCenter, centerOfShip)
     }
 
