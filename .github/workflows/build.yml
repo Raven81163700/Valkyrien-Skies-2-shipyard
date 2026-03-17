@@ -8,6 +8,12 @@ on:
       - '1.20.1/*'
   pull_request:
     types: [ opened, synchronize, reopened ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag (e.g. v2.4.10). Leave blank for a snapshot build.'
+        required: false
+        default: ''
 jobs:
   validate-gradle:
     name: "Validate Gradle wrapper"
@@ -33,23 +39,76 @@ jobs:
         with:
           comment: "true" # enable comment mode
 
-  # test-server:
-  #   name: Test Server
-  #   strategy:
-  #     matrix:
-  #       serverType: [ 'fabric', 'forge' ]
-  #   runs-on: ubuntu-latest
-  #   timeout-minutes: 20 # Fail after 20 minutes
-  #   steps:
-  #     - name: Shallow Clone (--recurse-submodules)
-  #       uses: actions/checkout@v4
-  #       with:
-  #         submodules: recursive
+  build-forge:
+    name: Build Forge Mod
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [ validate-gradle ]
+    permissions:
+      contents: read
 
-  #     - name: Setup Gradle & Caches
-  #       uses: "./.github/actions/setup-gradle"
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true   # include vs-core submodule if present
 
-  #     - name: Test Server
-  #       uses: ValkyrienSkies/Minecraft-Architectury-Testing@v1.9
-  #       with:
-  #         serverType: ${{ matrix.serverType }}
+      # ── 2. Java ──────────────────────────────────────────────────────────────
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ── 3. Gradle cache ──────────────────────────────────────────────────────
+      - name: Cache Gradle files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            **/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ── 4. Read mod version ───────────────────────────────────────────────────
+      - name: Read mod version
+        id: version
+        run: |
+          MOD_VERSION=$(grep '^mod_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          MC_VERSION=$(grep '^minecraft_version' gradle.properties | cut -d'=' -f2 | tr -d ' ')
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            MOD_VERSION="${{ github.event.inputs.release_tag }}"
+          fi
+          echo "mod_version=${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "mc_version=${MC_VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "artifact_name=valkyrienskies-${MC_VERSION}-forge-${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Build ──────────────────────────────────────────────────────────────
+      - name: Build Forge mod (remapJar)
+        run: ./gradlew :forge:remapJar --no-daemon --stacktrace
+        env:
+          block_external_repositories: false
+
+      # ── 6. Locate the built JAR ───────────────────────────────────────────────
+      - name: Locate built JAR
+        id: jar
+        run: |
+          JAR_PATH=$(find forge/build/libs -name "*.jar" \
+                       ! -name "*-dev.jar" \
+                       ! -name "*-sources.jar" \
+                       ! -name "*-shadow.jar" \
+                     | head -n 1)
+          echo "jar_path=${JAR_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Found JAR: ${JAR_PATH}"
+
+      # ── 7. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload Forge mod JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: ${{ steps.jar.outputs.jar_path }}
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 90 || 30 }}
+          if-no-files-found: error
