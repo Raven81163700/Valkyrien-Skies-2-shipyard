@@ -35,6 +35,8 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Vector3d;
@@ -77,6 +79,10 @@ import org.valkyrienskies.mod.util.McMathUtilKt;
 
 @Mixin(MinecraftServer.class)
 public abstract class MixinMinecraftServer implements IShipObjectWorldServerProvider, VsiGameServer {
+
+    @Unique
+    private static final Logger VS$LOGGER = LogManager.getLogger("VS2 Shipyard Dimension");
+
     @Shadow
     private PlayerList playerList;
 
@@ -98,6 +104,10 @@ public abstract class MixinMinecraftServer implements IShipObjectWorldServerProv
     @Unique
     private final Map<String, ServerLevel> dimensionToLevelMap = new HashMap<>();
 
+    /** Tracks whether the shipyard dimension has already been registered with VS Core. */
+    @Unique
+    private boolean vs$shipyardDimRegistered = false;
+
     @Inject(
         at = @At(value = "INVOKE", target = "Lnet/minecraft/server/MinecraftServer;initServer()Z"),
         method = "runServer"
@@ -111,6 +121,9 @@ public abstract class MixinMinecraftServer implements IShipObjectWorldServerProv
         ValkyrienSkiesMod.setCurrentServer(null);
         // Clear the compact allocator state so it is re-loaded from the next world's saved data.
         VS2CompactChunkAllocator.INSTANCE.clear();
+        // Reset the shipyard registration flag so a subsequent server start works correctly
+        // (e.g. when quitting to menu and loading a new world in the same game session).
+        vs$shipyardDimRegistered = false;
     }
 
     @Nullable
@@ -189,34 +202,85 @@ public abstract class MixinMinecraftServer implements IShipObjectWorldServerProv
         }
 
         // Register the dedicated shipyard dimension with VS Core if it is enabled and loaded.
-        // The shipyard dimension stores ship blocks at compact low coordinates to avoid the
-        // float32 rendering precision issue ("distance phenomenon") at high coordinates.
+        // NOTE: This block may not find the shipyard level here because on Forge the custom
+        // dimension ServerLevels are created AFTER the first getDataStorage() call.
+        // The reliable registration is done in postCreateLevelsTail() below (at TAIL of createLevels).
         if (VSGameConfig.SERVER.getUseShipyardDimension()) {
             final net.minecraft.server.level.ServerLevel shipyardLevel =
                 ShipyardDimension.getLevel(MinecraftServer.class.cast(this));
             if (shipyardLevel != null) {
-                final String shipyardDimId = VSGameUtilsKt.getDimensionId(shipyardLevel);
-                final DimensionParametersResolver.Parameters shipyardParams =
-                    DimensionParametersResolver.INSTANCE.getDimensionMap().get(shipyardDimId);
-                if (shipyardParams != null) {
-                    getShipObjectWorld().addDimension(
-                        shipyardDimId,
-                        VSGameUtilsKt.getYRange(shipyardLevel),
-                        shipyardParams.getGravity(),
-                        shipyardParams.getSeaLevel(),
-                        shipyardParams.getMaxY()
-                    );
-                } else {
-                    getShipObjectWorld().addDimension(
-                        shipyardDimId,
-                        VSGameUtilsKt.getYRange(shipyardLevel),
-                        McMathUtilKt.getDEFAULT_WORLD_GRAVITY(),
-                        0.0,
-                        256.0
-                    );
-                }
+                // Early registration succeeded (e.g. Fabric, or dimension was already available).
+                vsRegisterShipyardWithCore(shipyardLevel);
             }
+            // If null, postCreateLevelsTail() will handle it at TAIL.
         }
+    }
+
+    /**
+     * At the very end of createLevels(), ALL dimension ServerLevels (including custom ones from
+     * datapacks, such as valkyrienskies:shipyard) have been created and added to the server's
+     * levels map.  We use this TAIL injection to reliably register the shipyard dimension with
+     * VS Core on Forge (where custom-dimension levels are created AFTER the earlier
+     * getDataStorage() injection point that we use for the rest of VS Core setup).
+     *
+     * On Fabric the shipyard level is already present at the getDataStorage() injection point,
+     * so postCreateLevels will have already registered it (vs$shipyardDimRegistered == true)
+     * and this TAIL injection will be a no-op.
+     */
+    @Inject(method = "createLevels", at = @At("TAIL"))
+    private void postCreateLevelsTail(final CallbackInfo ci) {
+        if (!VSGameConfig.SERVER.getUseShipyardDimension()) return;
+        if (vs$shipyardDimRegistered) return; // already registered by postCreateLevels
+
+        final ServerLevel shipyardLevel =
+            ShipyardDimension.getLevel(MinecraftServer.class.cast(this));
+        if (shipyardLevel != null) {
+            vsRegisterShipyardWithCore(shipyardLevel);
+        } else {
+            VS$LOGGER.warn(
+                "[VS Shipyard] useShipyardDimension is enabled but the '{}' dimension was not " +
+                "found after createLevels() completed. Ship blocks will fall back to the player's " +
+                "dimension (high-coordinate storage). " +
+                "If this is a new world, ensure the mod's built-in datapack is being loaded. " +
+                "If you loaded a world that was created before this mod was installed, you may " +
+                "need to recreate the world for the shipyard dimension to be available.",
+                ShipyardDimension.DIMENSION_KEY.location()
+            );
+        }
+    }
+
+    /**
+     * Registers the shipyard dimension with VS Core's ship-object world.
+     * Sets vs$shipyardDimRegistered to true after a successful registration.
+     */
+    @Unique
+    private void vsRegisterShipyardWithCore(final ServerLevel shipyardLevel) {
+        if (getShipObjectWorld() == null) return; // Ship world not yet initialized – skip.
+        final String shipyardDimId = VSGameUtilsKt.getDimensionId(shipyardLevel);
+        final DimensionParametersResolver.Parameters shipyardParams =
+            DimensionParametersResolver.INSTANCE.getDimensionMap().get(shipyardDimId);
+        if (shipyardParams != null) {
+            getShipObjectWorld().addDimension(
+                shipyardDimId,
+                VSGameUtilsKt.getYRange(shipyardLevel),
+                shipyardParams.getGravity(),
+                shipyardParams.getSeaLevel(),
+                shipyardParams.getMaxY()
+            );
+        } else {
+            getShipObjectWorld().addDimension(
+                shipyardDimId,
+                VSGameUtilsKt.getYRange(shipyardLevel),
+                McMathUtilKt.getDEFAULT_WORLD_GRAVITY(),
+                0.0,
+                256.0
+            );
+        }
+        vs$shipyardDimRegistered = true;
+        VS$LOGGER.info(
+            "[VS Shipyard] Shipyard dimension '{}' successfully registered with VS Core.",
+            shipyardDimId
+        );
     }
 
     @Inject(

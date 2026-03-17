@@ -19,6 +19,7 @@ import net.minecraftforge.event.BuildCreativeModeTabContentsEvent
 import net.minecraftforge.event.RegisterCommandsEvent
 import net.minecraftforge.event.TagsUpdatedEvent
 import net.minecraftforge.event.entity.EntityAttributeCreationEvent
+import net.minecraftforge.event.server.ServerStartingEvent
 import net.minecraftforge.fml.ModList
 import net.minecraftforge.fml.ModLoadingContext
 import net.minecraftforge.fml.common.Mod
@@ -81,10 +82,16 @@ import org.valkyrienskies.mod.compat.flywheel.FlywheelCompat
 import org.valkyrienskies.mod.compat.hexcasting.HexcastingCompat
 import org.valkyrienskies.mod.forge.compat.epicfight.FracturedBlockStateInfoProvider
 import org.valkyrienskies.mod.forge.compat.hexcasting.ForgeShipAmbit
+import org.valkyrienskies.mod.common.world.ShipyardDimension
 import org.valkyrienskies.mod.util.ClientConnectivityUpdateQueue
+import org.apache.logging.log4j.LogManager
 
 @Mod(MOD_ID)
 class ValkyrienSkiesModForge {
+    companion object {
+        private val LOGGER = LogManager.getLogger("VS2 Shipyard Dimension")
+    }
+
     private val BLOCKS = DeferredRegister.create(ForgeRegistries.BLOCKS, MOD_ID)
     private val ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, MOD_ID)
     private val ENTITIES = DeferredRegister.create(ForgeRegistries.ENTITY_TYPES, MOD_ID)
@@ -149,6 +156,7 @@ class ValkyrienSkiesModForge {
         forgeBus.addListener(::registerCommands)
         forgeBus.addListener(::tagsUpdated)
         forgeBus.addListener(::registerResourceManagers)
+        forgeBus.addListener(::onServerStarting)
 
         TEST_CHAIR_REGISTRY = registerBlockAndItem("test_chair") { TestChairBlock }
         TEST_HINGE_REGISTRY = registerBlockAndItem("test_hinge") { TestHingeBlock }
@@ -331,6 +339,34 @@ class ValkyrienSkiesModForge {
 
     private fun tagsUpdated(event: TagsUpdatedEvent) {
         VSGameEvents.tagsAreLoaded.emit(Unit)
+    }
+
+    /**
+     * After the server has fully started (all levels created, VS Core initialized), log the
+     * shipyard dimension status so users and developers can quickly verify that the dimension
+     * loaded correctly.
+     *
+     * At this point [MixinMinecraftServer.postCreateLevelsTail] has already run, so the
+     * dimension should be registered with VS Core if the datapack was applied.
+     */
+    private fun onServerStarting(event: ServerStartingEvent) {
+        if (!VSGameConfig.SERVER.useShipyardDimension) return
+        val server = event.server
+        if (ShipyardDimension.isAvailable(server)) {
+            LOGGER.info(
+                "[VS Shipyard] Shipyard dimension '{}' is loaded and registered with VS Core.",
+                ShipyardDimension.DIMENSION_KEY.location()
+            )
+        } else {
+            LOGGER.error(
+                "[VS Shipyard] Shipyard dimension '{}' is NOT loaded! " +
+                "useShipyardDimension=true but the dimension is unavailable. " +
+                "Ships will fall back to high-coordinate storage in the player's dimension. " +
+                "To enable the shipyard dimension, ensure the world was created with this mod " +
+                "installed (the dimension is defined in the mod's built-in datapack).",
+                ShipyardDimension.DIMENSION_KEY.location()
+            )
+        }
     }
 
     private fun loadComplete(event: FMLLoadCompleteEvent) {
