@@ -117,6 +117,13 @@ internal class TransferAssemblyJob<R>(
     private var pauseSent = false
     private var releasedForcedChunks = false
     private var packetSettleUntilGameTime = Long.MIN_VALUE
+    /**
+     * The phase to resume after [AssemblyPhase.WAIT_FOR_CHUNKS] finishes.
+     * Each site that transitions to WAIT_FOR_CHUNKS must set this to the correct
+     * continuation phase so that the assembly pipeline resumes exactly where it
+     * left off rather than always restarting from PAUSE_CHUNK_UPDATES.
+     */
+    private var waitForChunksReturnPhase = AssemblyPhase.PAUSE_CHUNK_UPDATES
 
     private val changedChunksList: MutableList<ChunkPos> = ArrayList()
     private val changedPositionsList: MutableList<BlockPos> = ArrayList()
@@ -183,7 +190,7 @@ internal class TransferAssemblyJob<R>(
             }
             iterator.remove()
         }
-        phase = AssemblyPhase.PAUSE_CHUNK_UPDATES
+        phase = waitForChunksReturnPhase
     }
 
     fun tick(budgetNanos: Long, lightBudget: Int): Boolean {
@@ -244,6 +251,8 @@ internal class TransferAssemblyJob<R>(
             val transfer = plan.transfers[snapshotIndex]
             val sourceChunk = getChunkNow(transfer.sourcePos) ?: run {
                 requestChunkLoad(ChunkPos(transfer.sourcePos))
+                // Mid-snapshot: resume the snapshot after the missing chunk is loaded.
+                waitForChunksReturnPhase = AssemblyPhase.SNAPSHOT
                 phase = AssemblyPhase.WAIT_FOR_CHUNKS
                 return
             }
@@ -287,6 +296,8 @@ internal class TransferAssemblyJob<R>(
             }
             changedChunksList += changedChunks
             changedPositionsList += changedBlockPositions
+            // Snapshot complete: wait for all chunks before starting mutations.
+            waitForChunksReturnPhase = AssemblyPhase.PAUSE_CHUNK_UPDATES
             phase = AssemblyPhase.WAIT_FOR_CHUNKS
         }
     }
@@ -327,11 +338,17 @@ internal class TransferAssemblyJob<R>(
                 val sourceChunk = if (plan.removeOriginal) getChunkNow(snapshot.sourcePos) else null
                 if (plan.removeOriginal && sourceChunk == null) {
                     requestChunkLoad(ChunkPos(snapshot.sourcePos))
+                    // Mid-mutation: resume mutations directly, skipping PAUSE_CHUNK_UPDATES
+                    // to avoid re-emitting onPasteBeforeBlocksAreLoaded.
+                    waitForChunksReturnPhase = AssemblyPhase.APPLY_MUTATION
                     phase = AssemblyPhase.WAIT_FOR_CHUNKS
                     return
                 }
                 val destChunk = getChunkNow(snapshot.destPos) ?: run {
                     requestChunkLoad(ChunkPos(snapshot.destPos))
+                    // Mid-mutation: resume mutations directly, skipping PAUSE_CHUNK_UPDATES
+                    // to avoid re-emitting onPasteBeforeBlocksAreLoaded.
+                    waitForChunksReturnPhase = AssemblyPhase.APPLY_MUTATION
                     phase = AssemblyPhase.WAIT_FOR_CHUNKS
                     return
                 }
@@ -434,6 +451,10 @@ internal class TransferAssemblyJob<R>(
             val chunkPos = changedChunksList[refreshIndex]
             if (!ShipAssembler.sendChunkRefreshPacket(plan.level, chunkPos)) {
                 requestChunkLoad(chunkPos)
+                // Mid-refresh: resume the refresh directly to avoid re-running the
+                // completion path (which would fire onPasteAfterBlocksAreLoaded twice
+                // and invoke successCallback twice).
+                waitForChunksReturnPhase = AssemblyPhase.REFRESH_CHUNKS
                 phase = AssemblyPhase.WAIT_FOR_CHUNKS
                 return
             }
