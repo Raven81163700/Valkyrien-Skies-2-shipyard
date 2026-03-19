@@ -194,6 +194,7 @@ internal class TransferAssemblyJob<R>(
         val startNanos = System.nanoTime()
         return try {
             while (!hasExceededBudget(startNanos, budgetNanos) && phase != AssemblyPhase.DONE) {
+                val prevPhase = phase
                 when (phase) {
                     AssemblyPhase.SNAPSHOT -> snapshotStep(startNanos, budgetNanos)
                     AssemblyPhase.WAIT_FOR_CHUNKS -> waitForRequestedChunks()
@@ -208,6 +209,9 @@ internal class TransferAssemblyJob<R>(
                     AssemblyPhase.COMPLETE -> completeSuccessfully()
                     AssemblyPhase.DONE -> Unit
                 }
+                // If waiting for chunks and no progress was made, break to yield control so
+                // the server can process chunk-loading tasks and prevent an infinite spin loop.
+                if (phase == prevPhase && phase == AssemblyPhase.WAIT_FOR_CHUNKS) break
             }
             phase == AssemblyPhase.DONE
         } catch (t: Throwable) {
@@ -571,8 +575,12 @@ object AssemblyScheduler {
     }
 
     internal fun <R> runNow(job: TransferAssemblyJob<R>): R {
-        while (!job.tick(Long.MAX_VALUE, Int.MAX_VALUE)) {
-            // keep advancing until the job finishes
+        // Use managedBlock so the server can process pending tasks (e.g. chunk-loading
+        // callbacks from IO threads) between tick() calls. Without this, tick() would
+        // spin-block the server thread on WAIT_FOR_CHUNKS and never allow chunks to load,
+        // causing physics frames to accumulate indefinitely.
+        job.level.server.managedBlock {
+            job.tick(Long.MAX_VALUE, Int.MAX_VALUE)
         }
         return job.future.join()
     }
